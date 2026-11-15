@@ -12,6 +12,14 @@ All six artworks were coded and visually iterated with **Gemini 4 Hydrogen** on 
 | ![Fox in the Brambles](renders/03-fox-in-autumn.png)<br>**Fox in the Brambles** — Woodland Wildlife ([`03-fox-in-autumn.js`](src/subjects/03-fox-in-autumn.js)) | ![Quiet Morning Table](renders/04-still-life-teatime.png)<br>**Quiet Morning Table** — Editorial Still Life ([`04-still-life-teatime.js`](src/subjects/04-still-life-teatime.js)) |
 | ![Cliffside Beacon](renders/05-coastal-lighthouse.png)<br>**Cliffside Beacon** — Landscape ([`05-coastal-lighthouse.js`](src/subjects/05-coastal-lighthouse.js)) | ![Lantern Pond](renders/06-botanical-koi-pond.png)<br>**Lantern Pond** — Botanical & Aquatic ([`06-botanical-koi-pond.js`](src/subjects/06-botanical-koi-pond.js)) |
 
+### Procedural Animation (50 Frames @ 10 FPS)
+
+| ![The Little Sailor & the Cap-Stealing Octopus](renders/07-sailor-and-octopus.gif) |
+| :---: |
+| **The Little Sailor & the Cap-Stealing Octopus** — Single self-contained HTML animation ([`sailor-and-octopus.html`](sailor-and-octopus.html) · [Live page](https://pages.hashir.dev/sailor-and-octopus)) |
+
+Open [`sailor-and-octopus.html`](sailor-and-octopus.html) directly in any browser (no server needed) to play/pause the 5-second loop, scrub individual frames `0..49`, or download any frame as PNG.
+
 ## Running Locally
 
 ### Interactive Gallery
@@ -105,21 +113,25 @@ Register it in src/registry.js, run `node render.mjs`, inspect the
 rendered PNG directly, and refine any proportions or edge artifacts.
 ```
 
+For a **50-frame (5 seconds @ 10 fps) procedural animation** in a single self-contained HTML file (like [`sailor-and-octopus.html`](sailor-and-octopus.html)), ask Gemini 4 Hydrogen to inline the painterly primitives, cache the paper background once, use a 2-frame boil seed (`Math.floor(f / 2) % 3`) to avoid harsh per-frame flicker, pre-warm an offscreen 50-frame canvas cache, and verify key frames with headless Chrome + `ffmpeg`.
+
 ### 4. Recommended Workflow Loop with Gemini 4 Hydrogen
 
-1. **Generate** — Ask Gemini 4 Hydrogen to write the new `src/subjects/*.js` file and register it in [`src/registry.js`](src/registry.js).
-2. **Render** — Have it run `node render.mjs` to produce `renders/<id>.png`.
-3. **Inspect & Critique** — Have it view the rendered PNG directly (and point out any rounded ends, floating edges, or flat regions). Because all geometry and textures live in deterministic code, small tweaks to control points, `sharp: true`, or `drawTaperedHairLock` immediately improve the render.
+1. **Generate** — Ask Gemini 4 Hydrogen to write the new `src/subjects/*.js` file (or single-file HTML animation) and register it in [`src/registry.js`](src/registry.js).
+2. **Render** — Have it run `node render.mjs` to produce `renders/<id>.png` (or export 50 frames to a GIF).
+3. **Inspect & Critique** — Have it view the rendered frames directly (and point out any rounded ends, floating edges, or flat regions). Because all geometry and textures live in deterministic code, small tweaks to control points, `sharp: true`, or `drawTaperedHairLock` immediately improve the render.
 
 ## Project Structure
 
 ```text
 .
 ├── index.html                   # Interactive browser gallery + PNG downloader
+├── sailor-and-octopus.html      # Self-contained 50-frame @ 10 fps animation
 ├── render.mjs                   # Zero-dependency Node + headless Chrome PNG exporter
-├── renders/                     # Pre-rendered 1200x1200 PNG outputs
+├── renders/                     # Pre-rendered 1200x1200 PNGs & 10 fps animated GIF
 └── src/
     ├── painter.js               # Pure JS Canvas 2D painterly & texture engine
     ├── registry.js              # Exports ARTWORKS list
     └── subjects/                # Individual 1200x1200 procedural artwork modules
 ```
+

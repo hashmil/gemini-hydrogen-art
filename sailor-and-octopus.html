@@ -1,0 +1,1280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Little Sailor &amp; the Cap-Stealing Octopus (50 frames @ 10 fps)</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      color: var(--foreground, #1b1d21);
+    }
+    .stage-wrap {
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .canvas-frame {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #fdfcfb;
+      border: 1px solid var(--border, #e5dfd6);
+      border-radius: var(--radius, 12px);
+      overflow: hidden;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--card, #f7f4ef);
+      border: 1px solid var(--border, #e5dfd6);
+      border-radius: var(--radius, 10px);
+    }
+    button {
+      appearance: none;
+      border: 1px solid var(--border, #d8d1c7);
+      background: var(--secondary, #ffffff);
+      color: var(--foreground, #1b1d21);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--primary, #14698a);
+      color: var(--primary-foreground, #ffffff);
+      border-color: transparent;
+    }
+    button:hover { opacity: 0.9; }
+    .scrubber {
+      flex: 1 1 160px;
+      accent-color: var(--primary, #14698a);
+      cursor: pointer;
+    }
+    .readout {
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      font-size: 11px;
+      color: var(--muted-foreground, var(--muted, #6c6761));
+      min-width: 148px;
+      text-align: right;
+    }
+    .beat-badge {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted-foreground, var(--muted, #6c6761));
+      padding: 0 2px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="stage-wrap">
+    <div class="canvas-frame">
+      <canvas id="stage" width="900" height="900"></canvas>
+    </div>
+    <div class="controls">
+      <button id="playBtn" class="primary">Pause</button>
+      <button id="restartBtn">Frame 0</button>
+      <input id="scrub" class="scrubber" type="range" min="0" max="49" value="0" />
+      <span id="readout" class="readout">Frame 00/49 · 0.0s</span>
+      <button id="dlBtn">PNG</button>
+    </div>
+    <div class="beat-badge">
+      <span id="storyBeat">Beat 1 (0.0-0.8s): Calm setup &amp; curious octopus</span>
+      <span>50 frames · 5.0s @ 10 fps · pure procedural Canvas 2D</span>
+    </div>
+  </div>
+
+  <script>
+  (() => {
+    const TOTAL_FRAMES = 50;
+    const FPS = 10;
+    const W = 1200;
+    const H = 1200;
+
+    // --- 1. SEEDED PRNG & NOISE ---
+    function createRng(seed = 1337) {
+      let s = seed >>> 0;
+      const next = () => {
+        s += 0x6d2b79f5;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+      return {
+        next,
+        range: (a, b) => a + (b - a) * next(),
+        chance: (p) => next() < p,
+        gauss: () => {
+          const u = Math.max(1e-7, next());
+          const v = next();
+          return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+        },
+      };
+    }
+
+    function hash2(ix, iy, seed = 0) {
+      let h = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1442695041);
+      h = (h ^ (h >>> 13)) >>> 0;
+      h = Math.imul(h, 1274126177) >>> 0;
+      return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+
+    function noise2D(x, y, seed = 0) {
+      const ix = Math.floor(x), iy = Math.floor(y);
+      const fx = x - ix, fy = y - iy;
+      const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+      const a = hash2(ix, iy, seed), b = hash2(ix + 1, iy, seed);
+      const c = hash2(ix, iy + 1, seed), d = hash2(ix + 1, iy + 1, seed);
+      return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+    }
+
+    function hexToRgb(hex) {
+      const c = parseInt(hex.replace('#', ''), 16);
+      return { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
+    }
+
+    const rgbaCache = new Map();
+    function rgba(hex, alpha = 1) {
+      const a = Math.round(alpha * 100) / 100;
+      const key = hex + '|' + a;
+      let v = rgbaCache.get(key);
+      if (!v) {
+        const { r, g, b } = hexToRgb(hex);
+        v = `rgba(${r},${g},${b},${a})`;
+        rgbaCache.set(key, v);
+      }
+      return v;
+    }
+
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const easeInOut = (t) => {
+      const x = clamp01(t);
+      return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+    };
+    const easeOutBack = (t) => {
+      const x = clamp01(t);
+      const c1 = 1.70158, c3 = c1 + 1;
+      return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+    };
+
+    function cubicPt(p0, p1, p2, p3, t) {
+      const mt = 1 - t, mt2 = mt * mt, t2 = t * t;
+      return [
+        mt2 * mt * p0[0] + 3 * mt2 * t * p1[0] + 3 * mt * t2 * p2[0] + t2 * t * p3[0],
+        mt2 * mt * p0[1] + 3 * mt2 * t * p1[1] + 3 * mt * t2 * p2[1] + t2 * t * p3[1],
+      ];
+    }
+
+    function cubicTangent(p0, p1, p2, p3, t) {
+      const mt = 1 - t;
+      const dx = 3 * mt * mt * (p1[0] - p0[0]) + 6 * mt * t * (p2[0] - p1[0]) + 3 * t * t * (p3[0] - p2[0]);
+      const dy = 3 * mt * mt * (p1[1] - p0[1]) + 6 * mt * t * (p2[1] - p1[1]) + 3 * t * t * (p3[1] - p2[1]);
+      const len = Math.hypot(dx, dy) || 1;
+      return [dx / len, dy / len];
+    }
+
+    function organicEllipsePts(cx, cy, rx, ry, rot = 0, n = 32, wobble = 0.03, rng) {
+      const pts = [];
+      const p1 = rng ? rng.range(0, 6.28) : 0.7;
+      const p2 = rng ? rng.range(0, 6.28) : 2.1;
+      const cosR = Math.cos(rot), sinR = Math.sin(rot);
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const w = 1 + wobble * Math.sin(a * 3 + p1) + wobble * 0.5 * Math.cos(a * 5 + p2);
+        const lx = Math.cos(a) * rx * w;
+        const ly = Math.sin(a) * ry * w;
+        pts.push([cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR]);
+      }
+      return pts;
+    }
+
+    function sampleSmoothClosed(pts, stepsPerSeg = 5) {
+      const n = pts.length;
+      if (n < 3) return pts;
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const prev = pts[(i - 1 + n) % n], curr = pts[i], next = pts[(i + 1) % n];
+        const p0 = [(prev[0] + curr[0]) * 0.5, (prev[1] + curr[1]) * 0.5];
+        const p2 = [(curr[0] + next[0]) * 0.5, (curr[1] + next[1]) * 0.5];
+        for (let s = 0; s < stepsPerSeg; s++) {
+          const t = s / stepsPerSeg, mt = 1 - t;
+          out.push([
+            mt * mt * p0[0] + 2 * mt * t * curr[0] + t * t * p2[0],
+            mt * mt * p0[1] + 2 * mt * t * curr[1] + t * t * p2[1],
+          ]);
+        }
+      }
+      return out;
+    }
+
+    function traceSharpClosed(ctx, pts) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath();
+    }
+
+    function traceSmoothClosed(ctx, pts) {
+      const n = pts.length;
+      ctx.beginPath();
+      ctx.moveTo((pts[n - 1][0] + pts[0][0]) * 0.5, (pts[n - 1][1] + pts[0][1]) * 0.5);
+      for (let i = 0; i < n; i++) {
+        const c = pts[i], nx = pts[(i + 1) % n];
+        ctx.quadraticCurveTo(c[0], c[1], (c[0] + nx[0]) * 0.5, (c[1] + nx[1]) * 0.5);
+      }
+      ctx.closePath();
+    }
+
+    function getBounds(pts) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const [x, y] of pts) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+    }
+
+    // Cached static warm paper texture
+    const paperCanvas = document.createElement('canvas');
+    paperCanvas.width = W;
+    paperCanvas.height = H;
+    {
+      const pctx = paperCanvas.getContext('2d');
+      const prng = createRng(909);
+      pctx.fillStyle = '#fdfcfb';
+      pctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < 3200; i++) {
+        const x = prng.range(0, W), y = prng.range(0, H);
+        pctx.fillStyle = prng.chance(0.5) ? 'rgba(215,205,192,0.09)' : 'rgba(255,255,255,0.22)';
+        pctx.fillRect(x, y, prng.range(0.5, 1.4), prng.range(0.5, 1.4));
+      }
+    }
+
+    // --- 2. PAINTERLY DRAWING PRIMITIVES ---
+    function fillPastelShape(ctx, pts, opts = {}) {
+      const {
+        baseColor = '#f1c4b4',
+        altColor = null,
+        highlightColor = '#fff6f0',
+        shadowColor = null,
+        paperColor = '#fcfbfa',
+        angle = Math.PI * 0.45,
+        grainDensity = 0.85,
+        toothAmount = 0.38,
+        edgeRoughness = 0.85,
+        strokeAlpha = 0.24,
+        sharp = false,
+        rng = createRng(42),
+      } = opts;
+
+      const trace = () => (sharp ? traceSharpClosed(ctx, pts) : traceSmoothClosed(ctx, pts));
+      const edgePts = sharp ? pts : sampleSmoothClosed(pts, 4);
+      const b = getBounds(edgePts);
+      const cx = (b.minX + b.maxX) * 0.5, cy = (b.minY + b.maxY) * 0.5;
+      const diag = Math.hypot(b.w, b.h);
+
+      ctx.save();
+      trace();
+      ctx.fillStyle = baseColor;
+      ctx.fill();
+      ctx.clip();
+
+      if (altColor) {
+        const g = ctx.createLinearGradient(
+          cx - Math.cos(angle) * b.w * 0.5,
+          cy - Math.sin(angle) * b.h * 0.5,
+          cx + Math.cos(angle) * b.w * 0.5,
+          cy + Math.sin(angle) * b.h * 0.5
+        );
+        g.addColorStop(0, rgba(altColor, 0.24));
+        g.addColorStop(0.55, rgba(baseColor, 0));
+        g.addColorStop(1, rgba(shadowColor || altColor, 0.2));
+        ctx.fillStyle = g;
+        ctx.fillRect(b.minX - 6, b.minY - 6, b.w + 12, b.h + 12);
+      }
+
+      const area = Math.max(400, b.w * b.h);
+      const strokeCount = Math.min(1150, Math.round((area / 95) * grainDensity));
+      for (let i = 0; i < strokeCount; i++) {
+        const px = rng.range(b.minX - 6, b.maxX + 6);
+        const py = rng.range(b.minY - 6, b.maxY + 6);
+        const len = rng.range(10, Math.min(72, diag * 0.26));
+        const ja = angle + rng.range(-0.14, 0.14);
+        const dx = Math.cos(ja) * len * 0.5, dy = Math.sin(ja) * len * 0.5;
+        const roll = rng.next();
+        let col = baseColor, alpha = strokeAlpha;
+        if (roll < 0.28 && highlightColor) { col = highlightColor; alpha *= 0.75; }
+        else if (roll < 0.58 && altColor) { col = altColor; alpha *= 0.88; }
+        else if (roll > 0.86 && shadowColor) { col = shadowColor; alpha *= 0.7; }
+        ctx.strokeStyle = rgba(col, rng.range(alpha * 0.45, alpha));
+        ctx.lineWidth = rng.range(0.8, 2.2);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(px - dx, py - dy);
+        ctx.lineTo(px + dx, py + dy);
+        ctx.stroke();
+      }
+
+      if (toothAmount > 0) {
+        const specks = Math.min(1400, Math.round((area / 70) * toothAmount));
+        for (let i = 0; i < specks; i++) {
+          const x = rng.range(b.minX, b.maxX), y = rng.range(b.minY, b.maxY);
+          if (noise2D(x * 0.05, y * 0.05, 11) > 0.43 || rng.chance(0.32)) {
+            ctx.fillStyle = rgba(paperColor, rng.range(0.14, 0.5));
+            ctx.fillRect(x, y, rng.range(0.8, 2.0), rng.range(0.8, 1.8));
+          }
+        }
+      }
+
+      if (edgeRoughness > 0) {
+        trace();
+        ctx.strokeStyle = rgba(paperColor, 0.38);
+        ctx.lineWidth = edgeRoughness * 2.0;
+        ctx.setLineDash([2, 3, 1, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.restore();
+
+      if (edgeRoughness > 0) {
+        ctx.save();
+        for (let i = 0; i < edgePts.length; i++) {
+          const p = edgePts[i], q = edgePts[(i + 1) % edgePts.length];
+          const steps = Math.max(1, Math.round(Math.hypot(q[0] - p[0], q[1] - p[1]) / 6));
+          for (let s = 0; s < steps; s++) {
+            const t = s / steps;
+            const x = p[0] + (q[0] - p[0]) * t + rng.range(-1.0, 1.0) * edgeRoughness;
+            const y = p[1] + (q[1] - p[1]) * t + rng.range(-1.0, 1.0) * edgeRoughness;
+            ctx.fillStyle = rgba(rng.chance(0.72) ? baseColor : altColor || baseColor, rng.range(0.28, 0.7));
+            ctx.beginPath();
+            ctx.arc(x, y, rng.range(0.6, 1.45) * edgeRoughness, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
+    function fillStripedPastelShape(ctx, pts, stripes, opts = {}) {
+      const {
+        stripeAngle = 0,
+        ribAngle = Math.PI * 0.5,
+        stripeCurve = 0,
+        paperColor = '#fcfbfa',
+        ribDensity = 1.0,
+        toothAmount = 0.45,
+        sharp = false,
+        rng = createRng(99),
+      } = opts;
+
+      const trace = () => (sharp ? traceSharpClosed(ctx, pts) : traceSmoothClosed(ctx, pts));
+      const edgePts = sharp ? pts : sampleSmoothClosed(pts, 4);
+      const b = getBounds(edgePts);
+      const cx = (b.minX + b.maxX) * 0.5, cy = (b.minY + b.maxY) * 0.5;
+
+      ctx.save();
+      trace();
+      ctx.fillStyle = stripes[0].color;
+      ctx.fill();
+      ctx.clip();
+
+      let yCursor = b.minY - 30, idx = 0;
+      while (yCursor < b.maxY + 40) {
+        const band = stripes[idx % stripes.length];
+        const bh = band.height || 50;
+        const col = band.color, alt = band.altColor || col;
+        const bandPts = [];
+        for (let s = 0; s <= 12; s++) {
+          const t = s / 12, x = b.minX - 40 + (b.w + 80) * t;
+          bandPts.push([x, yCursor + Math.sin(t * Math.PI) * stripeCurve + rng.range(-1.8, 1.8)]);
+        }
+        for (let s = 12; s >= 0; s--) {
+          const t = s / 12, x = b.minX - 40 + (b.w + 80) * t;
+          bandPts.push([x, yCursor + bh + Math.sin(t * Math.PI) * stripeCurve + rng.range(-1.8, 1.8)]);
+        }
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(stripeAngle);
+        ctx.translate(-cx, -cy);
+        ctx.beginPath();
+        ctx.moveTo(bandPts[0][0], bandPts[0][1]);
+        for (let k = 1; k < bandPts.length; k++) ctx.lineTo(bandPts[k][0], bandPts[k][1]);
+        ctx.closePath();
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.clip();
+
+        const ribCount = Math.min(360, Math.round(((b.w * bh) / 55) * ribDensity));
+        for (let r = 0; r < ribCount; r++) {
+          const rx = rng.range(b.minX - 15, b.maxX + 15), ry = rng.range(yCursor - 6, yCursor + bh + 6);
+          const len = rng.range(12, bh * 0.92), a = ribAngle + rng.range(-0.08, 0.08);
+          const dx = Math.cos(a) * len * 0.5, dy = Math.sin(a) * len * 0.5;
+          const c = rng.chance(0.45) ? alt : rng.chance(0.28) ? paperColor : col;
+          ctx.strokeStyle = rgba(c, rng.range(0.18, 0.5));
+          ctx.lineWidth = rng.range(0.9, 2.3);
+          ctx.beginPath();
+          ctx.moveTo(rx - dx, ry - dy);
+          ctx.lineTo(rx + dx, ry + dy);
+          ctx.stroke();
+        }
+        ctx.restore();
+        yCursor += bh;
+        idx++;
+      }
+
+      const specks = Math.min(1200, Math.round(((b.w * b.h) / 72) * toothAmount));
+      for (let i = 0; i < specks; i++) {
+        ctx.fillStyle = rgba(paperColor, rng.range(0.12, 0.46));
+        ctx.fillRect(rng.range(b.minX, b.maxX), rng.range(b.minY, b.maxY), rng.range(0.8, 2.0), rng.range(0.8, 2.2));
+      }
+      ctx.restore();
+    }
+
+    function drawStippledBlush(ctx, cx, cy, rx, ry, color, opts = {}) {
+      const { intensity = 0.45, dotCount = 520, paperColor = '#fff7f3', paperFlecks = 0.24, rng = createRng(77) } = opts;
+      ctx.save();
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rx, ry));
+      grad.addColorStop(0, rgba(color, intensity * 0.55));
+      grad.addColorStop(0.6, rgba(color, intensity * 0.22));
+      grad.addColorStop(1, rgba(color, 0));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (let i = 0; i < dotCount; i++) {
+        const ang = rng.range(0, Math.PI * 2);
+        const dist = Math.abs(rng.gauss()) * 0.48;
+        if (dist > 1.05) continue;
+        const x = cx + Math.cos(ang) * rx * dist, y = cy + Math.sin(ang) * ry * dist;
+        const falloff = Math.max(0, 1 - dist);
+        const isFleck = rng.chance(paperFlecks);
+        ctx.fillStyle = rgba(isFleck ? paperColor : color, rng.range(0.1, intensity * 0.85) * (0.35 + falloff * 0.65));
+        ctx.beginPath();
+        ctx.arc(x, y, rng.range(0.7, 2.1), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawDryBrushRibbon(ctx, p0, p1, p2, p3, opts = {}) {
+      const {
+        widthStart = 28, widthEnd = 10, bristles = 16,
+        color = '#0b0e12', highlightColor = '#126483', highlightChance = 0.35,
+        dryness = 0.25, alpha = 0.88, rng = createRng(303),
+      } = opts;
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (let b = 0; b < bristles; b++) {
+        const u = bristles === 1 ? 0 : (b / (bristles - 1)) * 2 - 1;
+        const col = highlightColor && rng.chance(highlightChance) ? highlightColor : color;
+        let drawing = true, prev = null;
+        for (let s = 0; s <= 18; s++) {
+          const t = s / 18;
+          const c = cubicPt(p0, p1, p2, p3, t);
+          const tang = cubicTangent(p0, p1, p2, p3, t);
+          const norm = [-tang[1], tang[0]];
+          const w = widthStart + (widthEnd - widthStart) * t;
+          const spread = u * w * 0.5 + rng.range(-1.2, 1.2) * (1 + t * 0.8);
+          const pt = [c[0] + norm[0] * spread, c[1] + norm[1] * spread];
+          if (s > 1 && rng.chance(dryness * (0.3 + t * 0.9) * (0.4 + Math.abs(u) * 0.8))) drawing = false;
+          else if (!drawing && rng.chance(0.55)) drawing = true;
+          if (drawing && prev) {
+            ctx.strokeStyle = rgba(col, alpha * rng.range(0.55, 1.0) * (1 - t * 0.16));
+            ctx.lineWidth = Math.max(0.6, (w / bristles) * rng.range(1.1, 2.1) * (1 - t * 0.5));
+            ctx.beginPath();
+            ctx.moveTo(prev[0], prev[1]);
+            ctx.lineTo(pt[0], pt[1]);
+            ctx.stroke();
+          }
+          prev = pt;
+        }
+      }
+      ctx.restore();
+    }
+
+    function drawWispyStrand(ctx, p0, p1, p2, p3, opts = {}) {
+      const { widthStart = 1.6, widthEnd = 0.35, color = '#121518', alpha = 0.85, steps = 20, jitter = 0.35, rng = createRng(55) } = opts;
+      ctx.save();
+      ctx.lineCap = 'round';
+      let prev = p0;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const pt = cubicPt(p0, p1, p2, p3, t);
+        pt[0] += rng.range(-jitter, jitter);
+        pt[1] += rng.range(-jitter, jitter);
+        ctx.strokeStyle = rgba(color, alpha * (1 - t * 0.35));
+        ctx.lineWidth = Math.max(0.3, widthStart + (widthEnd - widthStart) * t);
+        ctx.beginPath();
+        ctx.moveTo(prev[0], prev[1]);
+        ctx.lineTo(pt[0], pt[1]);
+        ctx.stroke();
+        prev = pt;
+      }
+      ctx.restore();
+    }
+
+    function drawTaperedHairLock(ctx, p0, p1, p2, p3, opts = {}) {
+      const {
+        widthStart = 54, baseColor = '#080b0e', altColor = '#0f4e68', highlightColor = '#1c7ca0',
+        highlightChance = 0.42, tipWisps = 3, rng = createRng(707),
+      } = opts;
+      const steps = 14, leftPts = [], rightPts = [];
+      for (let i = 0; i < steps; i++) {
+        const t = i / steps;
+        const c = cubicPt(p0, p1, p2, p3, t);
+        const tang = cubicTangent(p0, p1, p2, p3, t);
+        const norm = [-tang[1], tang[0]];
+        const r = widthStart * 0.5 * Math.pow(1 - t, 0.82);
+        leftPts.push([c[0] + norm[0] * r, c[1] + norm[1] * r]);
+        rightPts.unshift([c[0] - norm[0] * r, c[1] - norm[1] * r]);
+      }
+      const poly = [...leftPts, p3, ...rightPts];
+      fillPastelShape(ctx, poly, {
+        baseColor, altColor, highlightColor,
+        angle: Math.atan2(p3[1] - p0[1], p3[0] - p0[0]),
+        grainDensity: 0.75, toothAmount: 0.12, edgeRoughness: 0.45, sharp: true, rng,
+      });
+      drawDryBrushRibbon(ctx, p0, p1, p2, p3, {
+        widthStart: widthStart * 0.8, widthEnd: 2, bristles: 12,
+        color: baseColor, highlightColor, highlightChance, dryness: 0.34, alpha: 0.88, rng,
+      });
+      const endTang = cubicTangent(p0, p1, p2, p3, 0.96);
+      for (let w = 0; w < tipWisps; w++) {
+        const spread = rng.range(-0.26, 0.26), len = rng.range(16, 40);
+        const dx = endTang[0] * Math.cos(spread) - endTang[1] * Math.sin(spread);
+        const dy = endTang[0] * Math.sin(spread) + endTang[1] * Math.cos(spread);
+        const startPt = [p3[0] - endTang[0] * rng.range(6, 22), p3[1] - endTang[1] * rng.range(6, 22)];
+        const endPt = [p3[0] + dx * len, p3[1] + dy * len];
+        drawWispyStrand(ctx, startPt, [(startPt[0] + endPt[0]) * 0.5, (startPt[1] + endPt[1]) * 0.5], endPt, endPt, {
+          widthStart: rng.range(1.5, 2.6), widthEnd: 0.3,
+          color: rng.chance(0.35) ? highlightColor : baseColor, alpha: rng.range(0.65, 0.9), steps: 10, rng,
+        });
+      }
+    }
+
+    function drawPainterlyTube(ctx, p0, p1, p2, p3, opts = {}) {
+      const {
+        widthStart = 28, widthEnd = 22, baseColor = '#145875', altColor = '#0c3a4f',
+        highlightColor = '#3f97b8', toothAmount = 0.3, rng = createRng(601),
+      } = opts;
+      const steps = 14, leftPts = [], rightPts = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const c = cubicPt(p0, p1, p2, p3, t);
+        const tang = cubicTangent(p0, p1, p2, p3, t);
+        const norm = [-tang[1], tang[0]];
+        const r = (widthStart + (widthEnd - widthStart) * t) * 0.5;
+        leftPts.push([c[0] + norm[0] * r, c[1] + norm[1] * r]);
+        rightPts.unshift([c[0] - norm[0] * r, c[1] - norm[1] * r]);
+      }
+      fillPastelShape(ctx, [...leftPts, ...rightPts], {
+        baseColor, altColor, highlightColor, toothAmount, edgeRoughness: 0.75, rng,
+      });
+    }
+
+    function drawCharcoalMark(ctx, pts, opts = {}) {
+      const { width = 16, color = '#14171a', alpha = 0.9, passes = 11, rng = createRng(19) } = opts;
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let p = 0; p < passes; p++) {
+        const ox = rng.range(-width * 0.24, width * 0.24), oy = rng.range(-width * 0.24, width * 0.24);
+        ctx.beginPath();
+        for (let i = 0; i < pts.length; i++) {
+          const x = pts[i][0] + ox + rng.range(-2, 2), y = pts[i][1] + oy + rng.range(-2, 2);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = rgba(color, rng.range(alpha * 0.24, alpha * 0.58));
+        ctx.lineWidth = rng.range(width * 0.24, width * 0.56);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawGouacheEye(ctx, cx, cy, rx, ry, lookX = 0, lookY = 0, blink = 0, opts = {}) {
+      const { irisColor = '#1c241e', irisRadius = 0.44, lidShadow = '#cfa092', rng = createRng(404) } = opts;
+      if (blink > 0.72) {
+        ctx.save();
+        ctx.strokeStyle = '#2b201e';
+        ctx.lineWidth = 4.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cx - rx * 0.85, cy + 4);
+        ctx.quadraticCurveTo(cx, cy + 16, cx + rx * 0.85, cy + 4);
+        ctx.stroke();
+        ctx.restore();
+        return;
+      }
+
+      const openScale = 1 - blink * 0.82;
+      const curRy = Math.max(6, ry * openScale);
+      const scleraPts = organicEllipsePts(cx, cy, rx, curRy, 0, 22, 0.03, rng);
+      ctx.save();
+      traceSmoothClosed(ctx, scleraPts);
+      ctx.fillStyle = '#fcfbf9';
+      ctx.fill();
+      ctx.clip();
+
+      const topGrad = ctx.createLinearGradient(cx, cy - curRy, cx, cy + curRy * 0.25);
+      topGrad.addColorStop(0, rgba(lidShadow, 0.45));
+      topGrad.addColorStop(1, rgba(lidShadow, 0));
+      ctx.fillStyle = topGrad;
+      ctx.fillRect(cx - rx - 4, cy - curRy - 4, rx * 2 + 8, curRy * 1.4);
+
+      const ix = cx + lookX * rx * 0.36;
+      const iy = cy + lookY * curRy * 0.36;
+      const ir = Math.min(rx, ry) * irisRadius;
+      ctx.fillStyle = irisColor;
+      ctx.beginPath();
+      ctx.ellipse(ix, iy, ir, ir * 1.03, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#090b0a';
+      ctx.beginPath();
+      ctx.arc(ix + lookX * 1.4, iy + lookY * 1.4, ir * 0.56, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(ix - ir * 0.28, iy - ir * 0.32, Math.max(2.2, ir * 0.22), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = rgba('#3b2824', 0.55);
+      ctx.lineWidth = 1.8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 1, rx * 1.01, curRy * 0.99, 0, Math.PI * 1.12, Math.PI * 1.88);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Tapered coral octopus tentacle with cream suction cups
+    function drawOctopusTentacle(ctx, p0, p1, p2, p3, widthStart, opts = {}) {
+      const { baseColor = '#e86f34', altColor = '#c5491c', highlightColor = '#f9a971', cups = true, rng = createRng(808) } = opts;
+      const steps = 14, leftPts = [], rightPts = [];
+      for (let i = 0; i < steps; i++) {
+        const t = i / steps;
+        const c = cubicPt(p0, p1, p2, p3, t);
+        const tang = cubicTangent(p0, p1, p2, p3, t);
+        const norm = [-tang[1], tang[0]];
+        const r = widthStart * 0.5 * Math.pow(1 - t, 0.72);
+        leftPts.push([c[0] + norm[0] * r, c[1] + norm[1] * r]);
+        rightPts.unshift([c[0] - norm[0] * r, c[1] - norm[1] * r]);
+      }
+      fillPastelShape(ctx, [...leftPts, p3, ...rightPts], {
+        baseColor, altColor, highlightColor, grainDensity: 0.9, toothAmount: 0.32, edgeRoughness: 0.7, sharp: true, rng,
+      });
+      if (cups) {
+        for (let k = 1; k <= 4; k++) {
+          const t = 0.22 + k * 0.15;
+          const c = cubicPt(p0, p1, p2, p3, t);
+          const tang = cubicTangent(p0, p1, p2, p3, t);
+          const norm = [-tang[1], tang[0]];
+          const r = Math.max(3, (1 - t) * widthStart * 0.18);
+          ctx.fillStyle = '#fae7d4';
+          ctx.beginPath();
+          ctx.arc(c[0] + norm[0] * widthStart * (1 - t) * 0.28, c[1] + norm[1] * widthStart * (1 - t) * 0.28, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawSailorCap(ctx, cx, cy, rot, scale, rng) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rot);
+      ctx.scale(scale, scale);
+
+      // Fluttering dark ribbon tails on left back of cap
+      drawDryBrushRibbon(ctx, [-95, 18], [-135, 34], [-152, 62], [-168, 88], {
+        widthStart: 16, widthEnd: 6, bristles: 8, color: '#141920', highlightColor: '#1b6e8f', highlightChance: 0.4, rng,
+      });
+
+      // Puff dome crown
+      const domePts = [
+        [-112, 12], [-96, -54], [-35, -82], [35, -82], [96, -54], [112, 12],
+      ];
+      fillPastelShape(ctx, domePts, {
+        baseColor: '#faf4e8', altColor: '#e5dbc7', highlightColor: '#ffffff',
+        grainDensity: 0.95, toothAmount: 0.35, edgeRoughness: 0.8, rng,
+      });
+
+      // Teal sailor band
+      const bandPts = [
+        [-116, 4], [0, 14], [116, 4], [110, 36], [0, 44], [-110, 36],
+      ];
+      fillPastelShape(ctx, bandPts, {
+        baseColor: '#156a8c', altColor: '#0e4760', highlightColor: '#56acc7',
+        grainDensity: 1.0, toothAmount: 0.36, edgeRoughness: 0.75, sharp: true, rng,
+      });
+
+      // Mustard pom-pom button on top
+      const pomPts = organicEllipsePts(0, -86, 20, 16, 0, 16, 0.08, rng);
+      fillPastelShape(ctx, pomPts, {
+        baseColor: '#e3bf2d', altColor: '#c39919', highlightColor: '#fae37b',
+        toothAmount: 0.3, edgeRoughness: 0.7, rng,
+      });
+
+      ctx.restore();
+    }
+
+    // --- 3. 50-FRAME STORY CHOREOGRAPHY ---
+    function getBeatLabel(f) {
+      if (f <= 8) return 'Beat 1 (0.0–0.8s): Calm setup & curious octopus';
+      if (f <= 19) return 'Beat 2 (0.9–1.9s): Sneaky tentacle lifts the sailor cap';
+      if (f <= 31) return 'Beat 3 (2.0–3.1s): Octopus crowns itself captain!';
+      return 'Beat 4 (3.2–4.9s): Octopus springs away with the cap';
+    }
+
+    function drawFrame(ctx, frameIdx) {
+      const f = frameIdx;
+      // 2-frame boil cycle so texture feels softly hand-drawn without flickering wildly
+      const boil = Math.floor(f / 2) % 3;
+      const rng = createRng(5001 + boil * 97);
+
+      ctx.save();
+      ctx.drawImage(paperCanvas, 0, 0);
+
+      // Compute animation parameters across frames 0..49
+      // Kid blink windows: frames 4-6, 28-30, 45-47
+      let kidBlink = 0;
+      if (f === 4 || f === 6 || f === 28 || f === 30 || f === 45 || f === 47) kidBlink = 0.55;
+      if (f === 5 || f === 29 || f === 46) kidBlink = 1.0;
+
+      // Octopus blink windows: frames 2-3, 25-26
+      let octoBlink = 0;
+      if (f === 2 || f === 25) octoBlink = 0.55;
+      if (f === 3 || f === 26) octoBlink = 1.0;
+
+      // Kid gaze & expression
+      let lookX = 0.14, lookY = -0.04;
+      let browLift = 0, browFurrow = 0;
+      let mouthMode = 'calm'; // calm | surprise | pout
+      if (f >= 13 && f <= 21) {
+        const p = easeInOut((f - 13) / 6);
+        lookX = lerp(0.14, 0.24, p);
+        lookY = lerp(-0.04, -0.46, p);
+        browLift = lerp(0, 20, p);
+        if (f >= 15) mouthMode = 'surprise';
+      } else if (f >= 22 && f <= 33) {
+        const p = easeInOut((f - 22) / 5);
+        lookX = lerp(0.24, 0.42, p);
+        lookY = lerp(-0.46, -0.1, p);
+        browLift = lerp(20, 0, p);
+        browFurrow = lerp(0, 1, p);
+        mouthMode = 'pout';
+      } else if (f >= 34) {
+        const p = easeInOut((f - 34) / 8);
+        lookX = 0.44;
+        lookY = lerp(-0.1, -0.45, p);
+        browFurrow = 0.65;
+        mouthMode = f > 41 ? 'surprise' : 'pout';
+      }
+
+      // Cowlick sprout pop when cap lifts (f >= 14)
+      let cowlickPop = 0;
+      if (f >= 14) {
+        const dt = (f - 14) / 8;
+        cowlickPop = Math.min(1, dt * 1.4) + Math.sin(dt * Math.PI * 2.2) * Math.exp(-dt * 1.1) * 0.32;
+      }
+
+      // Octopus position, squash/stretch, & jump arc (perched cleanly on kid's right shoulder!)
+      let octoX = 786, octoY = 758, octoRot = -0.06, octoSx = 1, octoSy = 1;
+      if (f <= 31) {
+        octoY += Math.sin(f * 0.55) * 3.5;
+        if (f >= 25 && f <= 31) {
+          // Proud puff-up bounce
+          const pt = (f - 25) / 6;
+          const b = Math.sin(pt * Math.PI) * 0.08;
+          octoSx = 1 + b;
+          octoSy = 1 - b * 0.6;
+        }
+      } else if (f >= 32 && f <= 34) {
+        // Anticipation crouch
+        const p = (f - 31) / 3;
+        octoSy = lerp(1, 0.82, p);
+        octoSx = lerp(1, 1.16, p);
+        octoY += p * 18;
+      } else {
+        // Spring upward and soar across upper-right (stays visible until frames 47-49)
+        const p = clamp01((f - 34) / 15);
+        const ep = easeInOut(p);
+        octoX = lerp(786, 1295, ep);
+        octoY = lerp(758, 120, ep) - Math.sin(p * Math.PI) * 190;
+        octoRot = lerp(-0.06, 0.34, ep);
+        octoSx = lerp(0.92, 1.04, p);
+        octoSy = lerp(1.12, 0.96, p);
+      }
+
+      // Cap position & rotation (from kid head -> lifted -> octopus head -> flies with octopus)
+      const capOnKid = { x: 525, y: 232, rot: -0.06, s: 1.06 };
+      const capPeak = { x: 672, y: 124, rot: 0.14, s: 0.98 };
+      const capOnOcto = { x: octoX + 6, y: octoY - 90, rot: octoRot + 0.08, s: 0.8 };
+
+      let cap = { ...capOnKid };
+      if (f >= 14 && f <= 20) {
+        const p = easeInOut((f - 14) / 6);
+        cap = {
+          x: lerp(capOnKid.x, capPeak.x, p),
+          y: lerp(capOnKid.y, capPeak.y, p) - Math.sin(p * Math.PI) * 34,
+          rot: lerp(capOnKid.rot, capPeak.rot, p),
+          s: lerp(capOnKid.s, capPeak.s, p),
+        };
+      } else if (f >= 21 && f <= 25) {
+        const p = easeOutBack((f - 21) / 4);
+        cap = {
+          x: lerp(capPeak.x, capOnOcto.x, p),
+          y: lerp(capPeak.y, capOnOcto.y, p),
+          rot: lerp(capPeak.rot, capOnOcto.rot, p),
+          s: lerp(capPeak.s, capOnOcto.s, p),
+        };
+      } else if (f >= 26) {
+        cap = { ...capOnOcto };
+      }
+
+      // --- A. SAILOR KID (centered at x=525) ---
+      // Back hair locks behind neck & ears
+      const backHair = [
+        [332, 326], [448, 232], [608, 232], [718, 326],
+        [752, 578], [662, 648], [388, 648], [298, 578],
+      ];
+      fillPastelShape(ctx, backHair, {
+        baseColor: '#090c10', altColor: '#0f445c', highlightColor: '#196f92',
+        grainDensity: 0.8, toothAmount: 0.14, edgeRoughness: 0.7, rng,
+      });
+
+      // Tapered spiky/feathered back hair ends tucked cleanly behind ears & shoulders
+      const hairSway = Math.sin(f * 0.35) * 4;
+      const kidLocks = [
+        { x0: 332, y0: 485, x1: 282, y1: 600, x2: 256 + hairSway, y2: 705, x3: 242 + hairSway * 1.4, y3: 785, w: 40 },
+        { x0: 350, y0: 505, x1: 308, y1: 622, x2: 286 + hairSway, y2: 725, x3: 278 + hairSway, y3: 814, w: 46 },
+        { x0: 372, y0: 525, x1: 338, y1: 635, x2: 320, y2: 722, x3: 314, y3: 790, w: 42 },
+        { x0: 684, y0: 515, x1: 718, y1: 620, x2: 738 - hairSway, y2: 705, x3: 746 - hairSway, y3: 775, w: 44 },
+        { x0: 706, y0: 492, x1: 748, y1: 602, x2: 770 - hairSway, y2: 695, x3: 782 - hairSway * 1.2, y3: 760, w: 40 },
+      ];
+      for (const L of kidLocks) {
+        drawTaperedHairLock(ctx, [L.x0, L.y0], [L.x1, L.y1], [L.x2, L.y2], [L.x3, L.y3], {
+          widthStart: L.w, baseColor: '#080b0e', altColor: '#0f4e68', highlightColor: '#1e7ca0', tipWisps: 3, rng,
+        });
+      }
+
+      // Striped Sailor Inner Tee
+      fillStripedPastelShape(
+        ctx,
+        [[425, 810], [625, 810], [670, 1220], [380, 1220]],
+        [
+          { color: '#faf7f1', altColor: '#e7e0d2', height: 24 },
+          { color: '#6b91b5', altColor: '#527598', height: 22 },
+        ],
+        { stripeAngle: -0.02, ribDensity: 0.9, toothAmount: 0.5, rng }
+      );
+
+      // Mustard & Violet Striped Cardigan / Fisherman Sweater (wider right shoulder shelf for octopus!)
+      fillStripedPastelShape(
+        ctx,
+        [[462, 815], [402, 825], [312, 885], [248, 1020], [218, 1225], [485, 1225], [472, 985]],
+        [
+          { color: '#e3bf2d', altColor: '#c9a11a', height: 74 },
+          { color: '#6b3ea2', altColor: '#542d85', height: 72 },
+        ],
+        { stripeAngle: -0.14, ribAngle: Math.PI * 0.52, stripeCurve: 5, ribDensity: 1.3, rng }
+      );
+      fillStripedPastelShape(
+        ctx,
+        [[588, 815], [658, 822], [776, 872], [832, 1008], [855, 1225], [568, 1225], [582, 985]],
+        [
+          { color: '#e3bf2d', altColor: '#c9a11a', height: 74 },
+          { color: '#6b3ea2', altColor: '#542d85', height: 72 },
+        ],
+        { stripeAngle: 0.14, ribAngle: Math.PI * 0.48, stripeCurve: 5, ribDensity: 1.3, rng }
+      );
+
+      // Teal Sailor Collar Flaps
+      fillPastelShape(ctx, [[435, 818], [505, 895], [442, 948], [388, 868]], {
+        baseColor: '#156a8c', altColor: '#0e4860', highlightColor: '#4da3c2', sharp: true, edgeRoughness: 0.75, rng,
+      });
+      fillPastelShape(ctx, [[615, 818], [545, 895], [608, 948], [662, 868]], {
+        baseColor: '#156a8c', altColor: '#0e4860', highlightColor: '#4da3c2', sharp: true, edgeRoughness: 0.75, rng,
+      });
+
+      // Neck & chin shadow (clean tapered column)
+      fillPastelShape(ctx, [[498, 692], [552, 692], [556, 822], [525, 840], [494, 822]], {
+        baseColor: '#efc0ae', altColor: '#df9d8c', highlightColor: '#f8dcd0', grainDensity: 0.85, toothAmount: 0.35, rng,
+      });
+      drawStippledBlush(ctx, 525, 718, 28, 14, '#c77a6e', { intensity: 0.25, dotCount: 180, rng });
+
+      // Ears & single gold hoop earring
+      for (const [ex, ey, flip] of [[298, 558, -1], [752, 545, 1]]) {
+        fillPastelShape(ctx, organicEllipsePts(ex, ey, 38, 48, flip * -0.15, 22, 0.05, rng), {
+          baseColor: '#f0bfae', altColor: '#e29889', highlightColor: '#fae0d6', toothAmount: 0.3, rng,
+        });
+        drawStippledBlush(ctx, ex + flip * 5, ey + 2, 20, 24, '#d65b53', { intensity: 0.65, dotCount: 220, rng });
+      }
+      drawPainterlyTube(ctx, [308, 598], [290, 616], [294, 646], [314, 648], {
+        widthStart: 10, widthEnd: 11, baseColor: '#dbb222', altColor: '#b98b12', highlightColor: '#f7de6f', rng,
+      });
+
+      // Kid Face
+      const facePts = [
+        [525, 275], [648, 298], [728, 392], [748, 520],
+        [712, 635], [625, 702], [525, 722], [425, 702],
+        [338, 635], [302, 520], [322, 392], [402, 298],
+      ];
+      fillPastelShape(ctx, facePts, {
+        baseColor: '#f2c4b4', altColor: '#eab3a2', highlightColor: '#fbe4db', shadowColor: '#dc998c',
+        grainDensity: 0.8, toothAmount: 0.36, edgeRoughness: 0.85, rng,
+      });
+
+      // Rosy stippled cheeks
+      drawStippledBlush(ctx, 385, 582, 62, 46, '#df6968', { intensity: 0.62, dotCount: 650, rng });
+      drawStippledBlush(ctx, 665, 575, 62, 46, '#df6968', { intensity: 0.62, dotCount: 650, rng });
+
+      // Kid Eyes
+      drawGouacheEye(ctx, 445, 502, 48, 46, lookX, lookY, kidBlink, { irisColor: '#1b241d', rng });
+      drawGouacheEye(ctx, 618, 495, 48, 46, lookX, lookY, kidBlink, { irisColor: '#1b241d', rng });
+
+      // Dynamic Charcoal Eyebrows
+      drawCharcoalMark(
+        ctx,
+        [[395, 422 - browLift + browFurrow * 10], [442, 412 - browLift], [486, 418 - browLift + browFurrow * 16]],
+        { width: 16, color: '#14171a', rng }
+      );
+      drawCharcoalMark(
+        ctx,
+        [[575, 414 - browLift + browFurrow * 16], [620, 408 - browLift], [666, 418 - browLift + browFurrow * 10]],
+        { width: 16, color: '#14171a', rng }
+      );
+
+      // Cute coral button nose & nostrils
+      fillPastelShape(ctx, [[526, 512], [540, 513], [548, 554], [520, 554]], {
+        baseColor: '#d96977', altColor: '#c35362', highlightColor: '#f19aa4', grainDensity: 1.2, toothAmount: 0.2, rng,
+      });
+      ctx.fillStyle = '#151214';
+      ctx.beginPath();
+      ctx.arc(527, 555, 4, 0, Math.PI * 2);
+      ctx.arc(542, 555, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Kid Mouth (calm / surprise 'o' / bewildered pout)
+      ctx.save();
+      if (mouthMode === 'surprise') {
+        ctx.fillStyle = '#b93f52';
+        ctx.beginPath();
+        ctx.ellipse(534, 618, 12, 16, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (mouthMode === 'pout') {
+        ctx.strokeStyle = '#c44b5d';
+        ctx.lineWidth = 7;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(508, 622);
+        ctx.quadraticCurveTo(534, 604, 560, 622);
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = '#c44b5d';
+        ctx.lineWidth = 6.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(512, 616);
+        ctx.quadraticCurveTo(534, 626, 556, 616);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Kid Forehead Hair & Tapered Bangs (seamless crown when cap lifts!)
+      fillPastelShape(
+        ctx,
+        [[372, 282], [525, 224], [676, 276], [696, 340], [528, 302], [358, 344]],
+        { baseColor: '#090c10', altColor: '#0e4c68', highlightColor: '#197599', toothAmount: 0.14, rng }
+      );
+      drawTaperedHairLock(ctx, [524, 250], [418, 258], [335, 342], [282, 520], {
+        widthStart: 78, baseColor: '#090c10', altColor: '#0e4c68', highlightColor: '#1b7da3', tipWisps: 4, rng,
+      });
+      drawTaperedHairLock(ctx, [525, 258], [468, 322], [398, 392], [324, 474], {
+        widthStart: 40, baseColor: '#090c10', altColor: '#125a79', highlightColor: '#2587aa', tipWisps: 3, rng,
+      });
+      drawTaperedHairLock(ctx, [526, 252], [646, 274], [722, 352], [755, 495], {
+        widthStart: 76, baseColor: '#090c10', altColor: '#125a79', highlightColor: '#2d8db0', tipWisps: 3, rng,
+      });
+      drawWispyStrand(ctx, [525, 276], [498, 350], [456, 418], [412, 475], { widthStart: 2.0, color: '#0d1014', rng });
+      drawWispyStrand(ctx, [430, 385], [385, 435], [342, 475], [304, 504], { widthStart: 1.4, color: '#14191e', rng });
+
+      // Springy cowlick sprout on top of kid's head (pops out when cap lifts!)
+      if (cowlickPop > 0.05) {
+        const ch = 68 * cowlickPop;
+        drawWispyStrand(ctx, [525, 240], [520, 240 - ch * 0.45], [505, 240 - ch * 0.85], [486, 240 - ch], {
+          widthStart: 4.2, widthEnd: 6.8, color: '#080b0e', alpha: 0.95, steps: 14, rng,
+        });
+        drawWispyStrand(ctx, [528, 242], [545, 242 - ch * 0.55], [568, 242 - ch * 0.8], [588, 242 - ch * 0.72], {
+          widthStart: 2.0, widthEnd: 0.4, color: '#14698a', alpha: 0.8, steps: 12, rng,
+        });
+      }
+
+      // --- B. INK-PUFF TRAIL WHEN OCTOPUS JUMPS (Frames 34..49) ---
+      if (f >= 34) {
+        const jp = clamp01((f - 34) / 15);
+        const puffs = [
+          { x: 788, y: 785, r: 34 },
+          { x: 875, y: 635, r: 26 },
+          { x: 965, y: 495, r: 21 },
+          { x: 1060, y: 355, r: 16 },
+        ];
+        puffs.forEach((pf, idx) => {
+          const threshold = idx * 0.16;
+          if (jp > threshold) {
+            const fade = Math.max(0, 1 - (jp - threshold) * 1.15);
+            if (fade > 0.05) {
+              drawStippledBlush(ctx, pf.x, pf.y, pf.r * (1.2 - fade * 0.2), pf.r * 0.85, '#196d8e', {
+                intensity: 0.42 * fade, dotCount: 160, rng,
+              });
+            }
+          }
+        });
+      }
+
+      // --- C. SNEAKY REACHING TENTACLE (Frames 8..24) ---
+      // Arches gracefully around the outside right of her hair to pinch the cap brim!
+      if (f >= 8 && f <= 24) {
+        let tipX = octoX + 10, tipY = octoY - 30;
+        let ctrl1X = octoX + 95, ctrl1Y = octoY - 120;
+        let ctrl2X = 895, ctrl2Y = 240;
+        const grabX = cap.x + 102 * cap.s;
+        const grabY = cap.y + 18 * cap.s;
+        if (f <= 14) {
+          const p = easeInOut((f - 8) / 6);
+          tipX = lerp(octoX + 15, grabX, p);
+          tipY = lerp(octoY - 20, grabY, p);
+          ctrl1X = lerp(octoX + 25, 945, p);
+          ctrl1Y = lerp(octoY - 40, 540, p);
+          ctrl2X = lerp(octoX + 40, 925, p);
+          ctrl2Y = lerp(octoY - 65, 205, p);
+        } else if (f <= 20) {
+          tipX = grabX;
+          tipY = grabY;
+          ctrl1X = 915;
+          ctrl1Y = 530;
+          ctrl2X = cap.x + 215;
+          ctrl2Y = cap.y + 75;
+        } else {
+          const p = easeInOut((f - 20) / 4);
+          tipX = lerp(capPeak.x + 98, octoX + 26, p);
+          tipY = lerp(capPeak.y + 18, octoY - 25, p);
+          ctrl1X = lerp(905, octoX + 70, p);
+          ctrl1Y = lerp(520, octoY - 110, p);
+          ctrl2X = lerp(capPeak.x + 190, octoX + 55, p);
+          ctrl2Y = lerp(capPeak.y + 70, octoY - 80, p);
+        }
+        drawOctopusTentacle(
+          ctx,
+          [octoX + 14, octoY + 4],
+          [ctrl1X, ctrl1Y],
+          [ctrl2X, ctrl2Y],
+          [tipX, tipY],
+          30,
+          { rng }
+        );
+      }
+
+      // --- D. THE CHEEKY CORAL OCTOPUS ---
+      if (octoX < 1380) {
+        ctx.save();
+        ctx.translate(octoX, octoY);
+        ctx.rotate(octoRot);
+        ctx.scale(octoSx, octoSy);
+
+        const wave = Math.sin(f * 0.7);
+        const flying = f >= 34;
+
+        // Back tentacles
+        drawOctopusTentacle(
+          ctx, [-38, 45], [-92, 65 + wave * 12], [-115, 110 - wave * 10],
+          flying ? [-135, 145 + wave * 14] : [-86, 124], 26, { rng }
+        );
+        drawOctopusTentacle(
+          ctx, [42, 42], [95, 58 - wave * 12], [118, 102 + wave * 10],
+          flying ? [102, 152 - wave * 14] : [104, 116], 26, { rng }
+        );
+
+        // Bulky pear-shaped coral octopus head/mantle
+        const headPts = [
+          [0, -78], [52, -62], [74, -8], [56, 48], [0, 62], [-56, 48], [-74, -8], [-52, -62],
+        ];
+        fillPastelShape(ctx, headPts, {
+          baseColor: '#e86f34', altColor: '#c5491c', highlightColor: '#faa870', shadowColor: '#9b3310',
+          grainDensity: 0.95, toothAmount: 0.34, edgeRoughness: 0.85, rng,
+        });
+
+        // Rosy stippled cheeks on octopus
+        drawStippledBlush(ctx, -40, 14, 22, 15, '#df4b52', { intensity: 0.58, dotCount: 220, rng });
+        drawStippledBlush(ctx, 40, 14, 22, 15, '#df4b52', { intensity: 0.58, dotCount: 220, rng });
+
+        // Octopus gaze
+        let oLookX = -0.28, oLookY = -0.24;
+        if (f >= 13 && f <= 24) { oLookX = -0.18; oLookY = -0.48; }
+        else if (f >= 25) { oLookX = -0.18; oLookY = 0.08; }
+
+        drawGouacheEye(ctx, -26, -12, 23, 22, oLookX, oLookY, octoBlink, {
+          irisColor: '#1b201e', irisRadius: 0.48, lidShadow: '#b84c20', rng,
+        });
+        drawGouacheEye(ctx, 26, -12, 23, 22, oLookX, oLookY, octoBlink, {
+          irisColor: '#1b201e', irisRadius: 0.48, lidShadow: '#b84c20', rng,
+        });
+
+        // Cheeky smirk when wearing the cap (f >= 25)
+        ctx.save();
+        ctx.strokeStyle = '#631d0c';
+        ctx.lineWidth = 3.8;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        if (f >= 25) {
+          ctx.moveTo(-16, 20);
+          ctx.quadraticCurveTo(0, 36, 18, 18);
+        } else {
+          ctx.moveTo(-10, 24);
+          ctx.quadraticCurveTo(0, 29, 10, 24);
+        }
+        ctx.stroke();
+        ctx.restore();
+
+        // Front tentacles (curled on kid's shoulder, or waving proudly like a captain!)
+        const captainWave = f >= 25 && f <= 33 ? Math.sin((f - 25) * 1.4) * 24 : 0;
+        drawOctopusTentacle(
+          ctx, [-26, 48], [-55, 88], [-74, 128 + captainWave * 0.4],
+          f >= 25 && f <= 31 ? [-102, 42 - captainWave] : [-42, 142 + wave * 8], 27, { rng }
+        );
+        drawOctopusTentacle(
+          ctx, [4, 52], [2, 98], [16, 134],
+          flying ? [-8, 175 + wave * 12] : [22, 146 - wave * 6], 26, { rng }
+        );
+        drawOctopusTentacle(
+          ctx, [30, 48], [62, 82], [86, 118],
+          f >= 25 && f <= 31 ? [108, 36 + captainWave] : [78, 138 + wave * 8], 26, { rng }
+        );
+
+        ctx.restore();
+      }
+
+      // --- E. SAILOR CAP (drawn on top so it sits cleanly on either head!) ---
+      if (cap.x < 1380) {
+        drawSailorCap(ctx, cap.x, cap.y, cap.rot, cap.s, rng);
+      }
+
+      ctx.restore();
+    }
+
+    // --- 4. PROGRESSIVE FRAME CACHE + 10 FPS PLAYER ---
+    const stage = document.getElementById('stage');
+    const sctx = stage.getContext('2d');
+    const playBtn = document.getElementById('playBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const scrub = document.getElementById('scrub');
+    const readout = document.getElementById('readout');
+    const storyBeat = document.getElementById('storyBeat');
+    const dlBtn = document.getElementById('dlBtn');
+
+    const frameCache = new Array(TOTAL_FRAMES).fill(null);
+    let currentFrame = 0;
+    let playing = true;
+
+    function getOrRenderFrame(idx) {
+      if (!frameCache[idx]) {
+        const off = document.createElement('canvas');
+        off.width = 900;
+        off.height = 900;
+        const octx = off.getContext('2d');
+        octx.scale(900 / W, 900 / H);
+        drawFrame(octx, idx);
+        frameCache[idx] = off;
+      }
+      return frameCache[idx];
+    }
+
+    function showFrame(idx) {
+      currentFrame = ((idx % TOTAL_FRAMES) + TOTAL_FRAMES) % TOTAL_FRAMES;
+      const cached = getOrRenderFrame(currentFrame);
+      sctx.clearRect(0, 0, 900, 900);
+      sctx.drawImage(cached, 0, 0);
+      scrub.value = currentFrame;
+      const padded = String(currentFrame).padStart(2, '0');
+      readout.textContent = `Frame ${padded}/49 · ${(currentFrame / FPS).toFixed(1)}s`;
+      storyBeat.textContent = getBeatLabel(currentFrame);
+    }
+
+    // Draw Frame 0 synchronously immediately on startup
+    showFrame(0);
+
+    // Pre-warm cache gently during idle frames so looping is 0% CPU
+    let warmIdx = 1;
+    function warmNext() {
+      if (warmIdx < TOTAL_FRAMES) {
+        getOrRenderFrame(warmIdx++);
+        setTimeout(warmNext, 12);
+      }
+    }
+    setTimeout(warmNext, 60);
+
+    let lastTick = performance.now();
+    function loop(now) {
+      if (playing && now - lastTick >= 1000 / FPS) {
+        lastTick = now - ((now - lastTick) % (1000 / FPS));
+        showFrame(currentFrame + 1);
+      }
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    playBtn.addEventListener('click', () => {
+      playing = !playing;
+      playBtn.textContent = playing ? 'Pause' : 'Play';
+      lastTick = performance.now();
+    });
+    restartBtn.addEventListener('click', () => {
+      playing = false;
+      playBtn.textContent = 'Play';
+      showFrame(0);
+    });
+    scrub.addEventListener('input', (e) => {
+      playing = false;
+      playBtn.textContent = 'Play';
+      showFrame(parseInt(e.target.value, 10));
+    });
+    dlBtn.addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.download = `sailor-octopus-frame-${String(currentFrame).padStart(2, '0')}.png`;
+      a.href = stage.toDataURL('image/png');
+      a.click();
+    });
+
+    // Expose deterministic frame render hook for headless GIF export
+    window.__renderFrameForExport = (idx) => {
+      showFrame(idx);
+      return stage.toDataURL('image/png');
+    };
+  })();
+  </script>
+</body>
+</html>
